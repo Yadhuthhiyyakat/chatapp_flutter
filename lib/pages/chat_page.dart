@@ -2,6 +2,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import '../services/chat_service.dart';
+import 'profile_page.dart';
 
 class ChatPage extends StatefulWidget {
   final String receiverUserEmail;
@@ -59,6 +60,14 @@ class _ChatPageState extends State<ChatPage> {
             IconButton(
               icon: const Icon(Icons.delete),
               onPressed: _deleteSelectedMessages,
+            )
+          else
+            IconButton(
+              icon: const Icon(Icons.person),
+              onPressed: () => Navigator.push(
+                context,
+                MaterialPageRoute(builder: (context) => const ProfilePage()),
+              ),
             ),
         ],
       ),

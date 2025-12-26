@@ -1,8 +1,10 @@
 import 'dart:io';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
+import 'package:image_picker/image_picker.dart';
 
 class ProfilePage extends StatefulWidget {
   const ProfilePage({super.key});
@@ -12,9 +14,13 @@ class ProfilePage extends StatefulWidget {
 }
 
 class _ProfilePageState extends State<ProfilePage> {
-  final TextEditingController _bioController = TextEditingController();
-  final TextEditingController _photoUrlController = TextEditingController();
-  final User? currentUser = FirebaseAuth.instance.currentUser;
+  final TextEditingController _nameController = TextEditingController();
+  final FirebaseAuth _auth = FirebaseAuth.instance;
+  final FirebaseFirestore _firestore = FirebaseFirestore.instance;
+
+  File? _image;
+  String? _currentPhotoUrl;
+  bool _isLoading = false;
 
   @override
   void initState() {
@@ -23,146 +29,159 @@ class _ProfilePageState extends State<ProfilePage> {
   }
 
   Future<void> _loadUserData() async {
-    if (currentUser != null) {
-      final doc = await FirebaseFirestore.instance
-          .collection('users')
-          .doc(currentUser!.uid)
-          .get();
-      if (doc.exists) {
-        final data = doc.data() as Map<String, dynamic>;
-        setState(() {
-          _bioController.text = data['bio'] ?? '';
-          _photoUrlController.text = data['photoUrl'] ?? '';
-        });
-      }
+    User? user = _auth.currentUser;
+    if (user != null) {
+      setState(() {
+        _nameController.text = user.displayName ?? '';
+        _currentPhotoUrl = user.photoURL;
+      });
+    }
+  }
+
+  Future<void> _pickImage() async {
+    final ImagePicker picker = ImagePicker();
+    final XFile? pickedFile = await picker.pickImage(
+      source: ImageSource.gallery,
+    );
+
+    if (pickedFile != null) {
+      setState(() {
+        _image = File(pickedFile.path);
+      });
     }
   }
 
   Future<void> _saveProfile() async {
-    if (currentUser != null) {
-      try {
-        await FirebaseFirestore.instance
-            .collection('users')
-            .doc(currentUser!.uid)
-            .set({
-              'uid': currentUser!.uid,
-              'email': currentUser!.email,
-              'bio': _bioController.text.trim(),
-              'photoUrl': _photoUrlController.text.trim(),
-            }, SetOptions(merge: true));
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text("Profile updated successfully")),
-          );
-        }
-      } catch (e) {
-        if (mounted) {
-          ScaffoldMessenger.of(
-            context,
-          ).showSnackBar(SnackBar(content: Text("Error updating profile: $e")));
-        }
+    setState(() => _isLoading = true);
+    User? user = _auth.currentUser;
+    if (user == null) return;
+
+    try {
+      String? photoURL = _currentPhotoUrl;
+
+      // 1. Upload Image to Firebase Storage if a new one is selected
+      if (_image != null) {
+        final storageRef = FirebaseStorage.instance
+            .ref()
+            .child('profile_images')
+            .child('${user.uid}.jpg');
+
+        await storageRef.putFile(_image!);
+        photoURL = await storageRef.getDownloadURL();
+      }
+
+      // 2. Update Firebase Auth Profile
+      await user.updateDisplayName(_nameController.text);
+      if (photoURL != null) {
+        await user.updatePhotoURL(photoURL);
+      }
+
+      // 3. Update Firestore User Document
+      // This ensures other users see the updated details in the chat list
+      await _firestore.collection('users').doc(user.uid).set({
+        'uid': user.uid,
+        'email': user.email,
+        'displayName': _nameController.text,
+        'photoURL': photoURL,
+      }, SetOptions(merge: true));
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Profile updated successfully!')),
+        );
+        Navigator.pop(context);
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Error: $e')));
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isLoading = false);
       }
     }
-  }
-
-  @override
-  void dispose() {
-    _bioController.dispose();
-    _photoUrlController.dispose();
-    super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text("Edit Profile"),
-        backgroundColor: Colors.deepPurple,
-        foregroundColor: Colors.white,
-      ),
+      backgroundColor: const Color(0xFFF8F9FE),
+      appBar: AppBar(title: const Text("Edit Profile"), elevation: 0),
       body: SingleChildScrollView(
-        padding: const EdgeInsets.all(16.0),
+        padding: const EdgeInsets.all(24.0),
         child: Column(
           children: [
-            const SizedBox(height: 20),
-            CircleAvatar(
-              radius: 50,
-              backgroundColor: Colors.deepPurple.shade100,
-              backgroundImage: _photoUrlController.text.isNotEmpty
-                  ? (_photoUrlController.text.startsWith('http')
-                        ? NetworkImage(_photoUrlController.text)
-                        : FileImage(File(_photoUrlController.text))
-                              as ImageProvider)
-                  : null,
-              onBackgroundImageError: _photoUrlController.text.isNotEmpty
-                  ? (_, __) {}
-                  : null,
-              child: _photoUrlController.text.isEmpty
-                  ? const Icon(Icons.person, size: 50, color: Colors.deepPurple)
-                  : null,
-            ),
-            const SizedBox(height: 20),
-            TextField(
-              controller: _bioController,
-              decoration: const InputDecoration(
-                labelText: "Bio",
-                border: OutlineInputBorder(),
-                prefixIcon: Icon(Icons.info_outline),
+            GestureDetector(
+              onTap: _pickImage,
+              child: Stack(
+                children: [
+                  CircleAvatar(
+                    radius: 64,
+                    backgroundColor: Colors.grey[200],
+                    backgroundImage: _image != null
+                        ? FileImage(_image!)
+                        : (_currentPhotoUrl != null
+                                  ? NetworkImage(_currentPhotoUrl!)
+                                  : null)
+                              as ImageProvider?,
+                    child: _image == null && _currentPhotoUrl == null
+                        ? const Icon(Icons.person, size: 64, color: Colors.grey)
+                        : null,
+                  ),
+                  Positioned(
+                    bottom: 0,
+                    right: 0,
+                    child: Container(
+                      padding: const EdgeInsets.all(8),
+                      decoration: const BoxDecoration(
+                        color: Colors.blueAccent,
+                        shape: BoxShape.circle,
+                      ),
+                      child: const Icon(
+                        Icons.camera_alt,
+                        color: Colors.white,
+                        size: 20,
+                      ),
+                    ),
+                  ),
+                ],
               ),
-              maxLines: 3,
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: 32),
             TextField(
-              controller: _photoUrlController,
+              controller: _nameController,
               decoration: InputDecoration(
-                labelText: "Photo URL",
-                border: const OutlineInputBorder(),
-                prefixIcon: const Icon(Icons.link),
-                helperText: "Enter a direct link to an image",
-                suffixIcon: IconButton(
-                  icon: const Icon(Icons.paste),
-                  onPressed: () async {
-                    final ClipboardData? data = await Clipboard.getData(
-                      Clipboard.kTextPlain,
-                    );
-                    if (data != null && data.text != null) {
-                      if (mounted) {
-                        setState(() {
-                          _photoUrlController.text = data.text!;
-                          _photoUrlController.selection =
-                              TextSelection.fromPosition(
-                                TextPosition(
-                                  offset: _photoUrlController.text.length,
-                                ),
-                              );
-                        });
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(content: Text("Link pasted!")),
-                        );
-                      }
-                    } else {
-                      if (mounted) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(content: Text("Clipboard is empty")),
-                        );
-                      }
-                    }
-                  },
+                labelText: "Display Name",
+                hintText: "Enter your name",
+                filled: true,
+                fillColor: Colors.white,
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: BorderSide.none,
                 ),
+                prefixIcon: const Icon(Icons.person_outline),
               ),
-              onChanged: (value) => setState(() {}),
             ),
-            const SizedBox(height: 24),
+            const SizedBox(height: 32),
             SizedBox(
               width: double.infinity,
+              height: 50,
               child: ElevatedButton(
-                onPressed: _saveProfile,
+                onPressed: _isLoading ? null : _saveProfile,
                 style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.deepPurple,
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(vertical: 16),
+                  backgroundColor: Colors.blueAccent,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
                 ),
-                child: const Text("Save Changes"),
+                child: _isLoading
+                    ? const CircularProgressIndicator(color: Colors.white)
+                    : const Text(
+                        "Save Changes",
+                        style: TextStyle(fontSize: 16, color: Colors.white),
+                      ),
               ),
             ),
           ],
